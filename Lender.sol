@@ -8,7 +8,6 @@ import {IERC20} from "./interfaces/IERC20.sol";
 import {Ownable} from "./utils/Ownable.sol";
 
 contract Lender is Ownable {
-    // @audit follow correct naming convention like Lender__PoolCreated...
     event PoolCreated(bytes32 indexed poolId, Pool pool);
     event PoolUpdated(bytes32 indexed poolId, Pool pool);
     event PoolBalanceUpdated(bytes32 indexed poolId, uint256 newBalance);
@@ -42,7 +41,6 @@ contract Lender is Ownable {
         uint256 auctionLength
     );
     event LoanBought(uint256 loanId);
-    //@audit spelling sized
     event LoanSiezed(address indexed borrower, address indexed lender, uint256 indexed loanId, uint256 collateral);
     event Refinanced(uint256 loanId);
 
@@ -73,7 +71,7 @@ contract Lender is Ownable {
     /// can only be called by the owner
     /// @param _fee the new fee
     function setLenderFee(uint256 _fee) external onlyOwner {
-        if (_fee > 5000) revert FeeTooHigh();
+        if (_fee > 5000) revert FeeTooHigh(); // q what is this hard coded value
         lenderFee = _fee;
     }
 
@@ -81,7 +79,7 @@ contract Lender is Ownable {
     /// can only be called by the owner
     /// @param _fee the new fee
     function setBorrowerFee(uint256 _fee) external onlyOwner {
-        if (_fee > 500) revert FeeTooHigh();
+        if (_fee > 500) revert FeeTooHigh(); // q what is this hard coded value
         borrowerFee = _fee;
     }
 
@@ -90,7 +88,7 @@ contract Lender is Ownable {
     /// @param _feeReceiver the new fee receiver
     function setFeeReceiver(address _feeReceiver) external onlyOwner {
         // @audit should check for address(0)
-        // @audit(?) this address can Dos attack by basically just not being able t receive ETH
+        // @audit(?) this address can Dos attack by basically just not being able to receive ETH or to reenter the function to get more fees
         feeReceiver = _feeReceiver;
     }
 
@@ -123,17 +121,17 @@ contract Lender is Ownable {
     /// updates pool info for msg.sender
     /// @param p the new pool info
     function setPool(Pool calldata p) public returns (bytes32 poolId) {
-        // q !!!!! is it possible to make a reentracy attack on this function!!!!!
+        //@audit this function can be reentered
         // validate the pool
         if (
             p.lender != msg.sender || p.minLoanSize == 0 || p.maxLoanRatio == 0 || p.auctionLength == 0
                 || p.auctionLength > MAX_AUCTION_LENGTH || p.interestRate > MAX_INTEREST_RATE
         ) revert PoolConfig();
 
+        //@audit the ERC20 I am giving is malicious. But even if we prevent from e.g. misconfigured tokens I can make a metamorphic contract and upload a correctly configured ERC20 with self-destruct then replace it with a malicious code. Does this is a vulnerability
         // check if they already have a pool balance
         poolId = getPoolId(p.lender, p.loanToken, p.collateralToken);
 
-        //@audit ok but what if there is not already set pool in the pool mapping then this always reverts ?!?!
         // you can't change the outstanding loans
         if (p.outstandingLoans != pools[poolId].outstandingLoans) {
             revert PoolConfig();
@@ -143,7 +141,7 @@ contract Lender is Ownable {
 
         if (p.poolBalance > currentBalance) {
             // if new balance > current balance then transfer the difference from the lender
-            // @audit fee on transfer
+            //@audit fee on transfer
             IERC20(p.loanToken).transferFrom(p.lender, address(this), p.poolBalance - currentBalance);
         } else if (p.poolBalance < currentBalance) {
             // if new balance < current balance then transfer the difference back to the lender
@@ -184,7 +182,7 @@ contract Lender is Ownable {
     /// @param amount the amount to remove
     function removeFromPool(bytes32 poolId, uint256 amount) external {
         if (pools[poolId].lender != msg.sender) revert Unauthorized();
-        if (amount == 0) revert PoolConfig();
+        if (amount == 0) revert PoolConfig(); //@audit check does the pool balance has enough amount
         _updatePoolBalance(poolId, pools[poolId].poolBalance - amount);
         // transfer the loan tokens from the contract to the lender
 
@@ -209,7 +207,7 @@ contract Lender is Ownable {
     /// @param interestRate the new interest rate
     function updateInterestRate(bytes32 poolId, uint256 interestRate) external {
         if (pools[poolId].lender != msg.sender) revert Unauthorized();
-        if (interestRate > MAX_INTEREST_RATE) revert PoolConfig(); // q is it allowed the interedtRate to be 0
+        if (interestRate > MAX_INTEREST_RATE) revert PoolConfig(); // q is it allowed the interetRate to be 0
         pools[poolId].interestRate = interestRate;
         emit PoolInterestRateUpdated(poolId, interestRate);
     }
@@ -219,6 +217,8 @@ contract Lender is Ownable {
     /// you are allowed to open many borrows at once
     /// @param borrows a struct of all desired debt positions to be opened
     function borrow(Borrow[] calldata borrows) public {
+        // q can i borrow from my pool
+        //@audit the attacker can pass a huge amount of borrows and make the function to require more gas to execute than there is in the block gas limit
         for (uint256 i = 0; i < borrows.length; i++) {
             bytes32 poolId = borrows[i].poolId;
             uint256 debt = borrows[i].debt;
@@ -244,26 +244,28 @@ contract Lender is Ownable {
                 collateral: collateral,
                 interestRate: pool.interestRate,
                 startTimestamp: block.timestamp,
-                auctionStartTimestamp: type(uint256).max, // @audit this will never happen why? i want to do this
+                auctionStartTimestamp: type(uint256).max,
                 auctionLength: pool.auctionLength
             });
             // update the pool balance
             _updatePoolBalance(poolId, pools[poolId].poolBalance - debt);
             pools[poolId].outstandingLoans += debt;
             // calculate the fees
-            uint256 fees = (debt * borrowerFee) / 10000;
+            uint256 fees = (debt * borrowerFee) / 10000; //@audit percision loss (100 * 50 * 1e18) / 10000
             // transfer fees
 
             // @audit the same edge case with fee on transfer
-            IERC20(loan.loanToken).transfer(feeReceiver, fees);
+            IERC20(loan.loanToken).transfer(feeReceiver, fees); //@audit the feeRecever can reenter the function
             // transfer the loan tokens from the pool to the borrower
-            IERC20(loan.loanToken).transfer(msg.sender, debt - fees);
+            IERC20(loan.loanToken).transfer(msg.sender, debt - fees); //@audit the msg.sender can also reenter and if this happen the fee recevert also will be on plus
             // transfer the collateral tokens from the borrower to the contract
             IERC20(loan.collateralToken).transferFrom(msg.sender, address(this), collateral);
             loans.push(loan);
             emit Borrowed(
                 msg.sender, pool.lender, loans.length - 1, debt, collateral, pool.interestRate, block.timestamp
             );
+
+            //@audit there could be Black listable tokens, which have banned users
         }
     }
 
@@ -271,7 +273,7 @@ contract Lender is Ownable {
     /// can be called by anyone
     /// @param loanIds the ids of the loans to repay
     function repay(uint256[] calldata loanIds) public {
-        //@audit follow CEI(Checks effects interacts)
+        //@audit follow CEI(Checks effects interacts)(can be reentered)
         for (uint256 i = 0; i < loanIds.length; i++) {
             uint256 loanId = loanIds[i];
             // get the loan info
@@ -308,7 +310,7 @@ contract Lender is Ownable {
     /// @param loanIds the ids of the loans to give
     /// @param poolIds the id of the pools to give to
     function giveLoan(uint256[] calldata loanIds, bytes32[] calldata poolIds) external {
-        // @audit we have to make a check that the loanIds.length is equal to poolIds.length for better user experience
+        // @audit we have to make a check that the loanIds.length is equal to poolIds.length
         for (uint256 i = 0; i < loanIds.length; i++) {
             uint256 loanId = loanIds[i];
             bytes32 poolId = poolIds[i];
@@ -402,6 +404,7 @@ contract Lender is Ownable {
     /// @param loanId the id of the loan to refinance
     /// @param poolId the pool to accept
     function buyLoan(uint256 loanId, bytes32 poolId) public {
+        //@audit not checking does i have a pool with tokens
         // get the loan info
         Loan memory loan = loans[loanId];
         // validate the loan
@@ -488,13 +491,13 @@ contract Lender is Ownable {
             }
             if (block.timestamp < loan.auctionStartTimestamp + loan.auctionLength) revert AuctionNotEnded();
             // calculate the fee
-            uint256 govFee = (borrowerFee * loan.collateral) / 10000;
+            uint256 govFee = (borrowerFee * loan.collateral) / 10000; //@audit precision loss
             // transfer the protocol fee to governance
             IERC20(loan.collateralToken).transfer(feeReceiver, govFee);
             // transfer the collateral tokens from the contract to the lender
             IERC20(loan.collateralToken).transfer(loan.lender, loan.collateral - govFee);
 
-            bytes32 poolId = keccak256(abi.encode(loan.lender, loan.loanToken, loan.collateralToken)); //@audit use abi.encodePacked
+            bytes32 poolId = keccak256(abi.encode(loan.lender, loan.loanToken, loan.collateralToken));
 
             // update the pool outstanding loans
             pools[poolId].outstandingLoans -= loan.debt;
@@ -509,6 +512,7 @@ contract Lender is Ownable {
     /// can only be called by the borrower
     /// @param refinances a struct of all desired debt positions to be refinanced
     function refinance(Refinance[] calldata refinances) public {
+        //@audit reentrancy attack
         for (uint256 i = 0; i < refinances.length; i++) {
             // @audit initialized default value, uncached array length, could to unchecked ++i
             uint256 loanId = refinances[i].loanId;
@@ -554,9 +558,10 @@ contract Lender is Ownable {
             } else if (debtToPay < debt) {
                 // we have excess loan tokens so we give some back to the borrower
                 // first we take our borrower fee
-                uint256 fee = (borrowerFee * (debt - debtToPay)) / 10000;
+                uint256 fee = (borrowerFee * (debt - debtToPay)) / 10000; //@audit precision loss
                 IERC20(loan.loanToken).transfer(feeReceiver, fee);
                 // transfer the loan tokens from the contract to the borrower
+                //@audit what if debt - debtToPay - fee <= 0 then this could revert
                 IERC20(loan.loanToken).transfer(msg.sender, debt - debtToPay - fee);
             }
             // transfer the protocol fee to governance
@@ -603,12 +608,13 @@ contract Lender is Ownable {
     /// @return fees the fees accrued
     function _calculateInterest(Loan memory l) internal view returns (uint256 interest, uint256 fees) {
         uint256 timeElapsed = block.timestamp - l.startTimestamp;
-        // @audit multiply by 1e18 and at the end maybe devide by 1e18 ????!?!?
         // @audit perform both divisions at once to minimize early rounding losses (?)
         // @audit we multiply by 1e18 but some ERC20 tokens work with more decimals like 24 rather than 18 which may cause math problems
+        // @audit some ERC20 tokens work with 6 decimals which could lead to precision loss
+        //@audit precision loss can occur due to integer division
         //interest = (l.interestRate * l.debt * timeElapsed) / (10000 / 365 days);
         interest = (l.interestRate * l.debt * timeElapsed) / 10000 / 365 days;
-        fees = (lenderFee * interest) / 10000;
+        fees = (lenderFee * interest) / 10000; //@audit if the interest < 10 we will get precision loss so multiply by 1e18
         interest -= fees;
     }
 
